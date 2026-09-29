@@ -1,10 +1,13 @@
 import pandas as pd
 import spacy 
 import re
-        
+
+import logging
 import json
 import os
 from openai import OpenAI
+
+log = logging.getLogger(__name__)
 
 # ================== #
 # Abstract Filtering #
@@ -75,11 +78,13 @@ class Filtering():
             
         selected_indices = set()    
     
-t
+        for index in relevant_indices:
+            start = max(0, index - self.window)
+            end = min(len(periods), index + self.window + 1)
     
-            # Adiciona os índices ao set de índices que serão considerados 
             for i in range(start, end):
                 selected_indices.add(i)
+
     
         return sorted(selected_indices)
 
@@ -131,7 +136,8 @@ class Extracting():
 
         self.client = OpenAI(
             api_key=api_key,
-            base_url=base_url
+            base_url=base_url,
+	    
         )
 
         self.corpus = corpus
@@ -172,10 +178,7 @@ class Extracting():
                 self.extracted_rows.extend(record["rows"])
 
         if self.processed_ids:
-            print(
-                f"[checkpoint] {len(self.processed_ids)} documentos já "
-                f"processados encontrados em '{self.checkpoint_path}', retomando..."
-            )
+            log.info(f"{len(self.processed_ids)} documentos já processados encontrados em '{self.checkpoint_path}', retomando...")
 
     
     def _save_checkpoint(self, doc_id, rows):
@@ -200,18 +203,25 @@ class Extracting():
             {doc}
             """
 
-            
+        
     def _extract_with_llm(self, doc):
 
         response = self.client.responses.parse(
             model=self.model,
             instructions=self.system,
             input=self._create_user_prompt(doc),
-            text_format=self.schema
+            text_format=self.schema,
+  	    temperature=0.5
         )
 
         return response.output_parsed
 
+        
+    def _values_or_none(self, field):
+        """Converte uma lista de Enum em lista de strings, preservando None."""
+        return [item.value for item in field] if field else None
+    
+    
     def _result_to_rows(self, doc_id, result):
     
         rows = []
@@ -220,16 +230,19 @@ class Extracting():
             row = {
                 "doc_id": doc_id,
                 "experiment_id": experiment_id,
-                "material": experiment.material,
-                "method": experiment.synthesis.method,
-                "temperature": experiment.synthesis.temperature,
-                "temperature_unit": experiment.synthesis.temperature_unit,
-                "time": experiment.synthesis.time,
-                "time_unit": experiment.synthesis.time_unit
+                "synthesis_methods": self._values_or_none(experiment.synthesis_methods),
+                "synthesis_direction": self._values_or_none(experiment.synthesis_direction),
+                "post_synthesis_modifications": self._values_or_none(experiment.post_synthesis_modifications),
+                "synthesis_engineering": self._values_or_none(experiment.synthesis_engineering),
+                "num_sheets": self._values_or_none(experiment.num_sheets),
+                "structure_format": self._values_or_none(experiment.structure_format),
+                "specific_applications": self._values_or_none(experiment.specific_applications),
+                "general_applications": self._values_or_none(experiment.general_applications),
             }
             rows.append(row)
     
         return rows
+        
 
     def extract(self):
         """Executa a extração no corpus inteiro, pulando documentos já
@@ -247,10 +260,10 @@ class Extracting():
 
             try:
                 result = self._extract_with_llm(doc)
-                rows = self._result_to_rows(result)
+                rows = self._result_to_rows(doc_id, result)
 
             except Exception as error:
-                print(f"[erro] doc_id={doc_id} ({position}/{total}): {error}")
+                log.error(f"doc_id={doc_id} ({position}/{total}): {error}")
                 self.failed_ids.append(doc_id)
                 continue
 
@@ -258,13 +271,14 @@ class Extracting():
             self.processed_ids.add(doc_id)
             self._save_checkpoint(doc_id, rows)
 
-            print(f"[ok] doc_id={doc_id} ({position}/{total}) — {len(rows)} experimento(s) extraído(s)")
+            log.info(f"doc_id={doc_id} ({position}/{total}) — {len(rows)} experimento(s) extraído(s)")
 
         if self.failed_ids:
-            print(f"[aviso] {len(self.failed_ids)} documento(s) falharam: {self.failed_ids}")
+            log.warning(f"{len(self.failed_ids)} documento(s) falharam: {self.failed_ids}")
 
         return pd.DataFrame(self.extracted_rows)
 
+    
     def retry_failed(self):
         """Tenta reprocessar apenas os documentos que falharam na última
         chamada a extract(). Útil para rodar de novo só os erros, sem
